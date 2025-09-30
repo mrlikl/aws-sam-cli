@@ -16,6 +16,7 @@ from samcli.commands._utils.template import (
     get_template_data,
     move_template,
 )
+from samcli.lib.utils.ca_bundle import get_ca_bundle_from_profile
 from samcli.commands.build.exceptions import InvalidBuildDirException, MissingBuildMethodException
 from samcli.commands.build.utils import MountMode, prompt_user_to_enable_mount_with_write_if_needed
 from samcli.commands.exceptions import UserException
@@ -400,6 +401,9 @@ class BuildContext:
             if esbuild_manager.esbuild_configured():
                 modified_template = esbuild_manager.handle_template_post_processing()
 
+            # Inject CA bundle environment variables if ca_bundle is configured
+            modified_template = self._inject_ca_bundle_env_vars(modified_template)
+
             move_template(stack.location, output_template_path, modified_template)
 
     def _gen_success_msg(self, artifacts_dir: str, output_template_path: str, is_default_build_dir: bool) -> str:
@@ -718,3 +722,58 @@ Commands you can use next
     @property
     def build_in_source(self) -> Optional[bool]:
         return self._build_in_source
+
+    def _inject_ca_bundle_env_vars(self, template: dict) -> dict:
+        """
+        Inject CA bundle environment variables into the template's Globals section if ca_bundle is configured.
+        
+        Parameters
+        ----------
+        template : dict
+            The SAM template dictionary
+        
+        Returns
+        -------
+        dict
+            Modified template with CA bundle environment variables injected
+        """
+        # Get ca_bundle from AWS profile (using default if not specified)
+        # Note: BuildContext doesn't have aws_profile, so we'll use None (default profile)
+        ca_bundle = get_ca_bundle_from_profile(None)
+        
+        if not ca_bundle:
+            return template
+        
+        # Get just the filename from the ca_bundle path
+        import os
+        ca_bundle_filename = os.path.basename(ca_bundle)
+        
+        LOG.debug("CA bundle found at %s, injecting environment variables", ca_bundle)
+        
+        # Ensure Globals section exists
+        if "Globals" not in template:
+            template["Globals"] = {}
+        
+        # Ensure Function section exists
+        if "Function" not in template["Globals"]:
+            template["Globals"]["Function"] = {}
+        
+        # Ensure Environment section exists
+        if "Environment" not in template["Globals"]["Function"]:
+            template["Globals"]["Function"]["Environment"] = {}
+        
+        # Ensure Variables section exists
+        if "Variables" not in template["Globals"]["Function"]["Environment"]:
+            template["Globals"]["Function"]["Environment"]["Variables"] = {}
+        
+        # Add CA bundle environment variables with full container path
+        variables = template["Globals"]["Function"]["Environment"]["Variables"]
+        container_ca_path = f"/tmp/{ca_bundle_filename}"
+        variables["NODE_EXTRA_CA_CERTS"] = container_ca_path
+        variables["REQUESTS_CA_BUNDLE"] = container_ca_path
+        variables["SSL_CERT_FILE"] = container_ca_path
+        variables["AWS_CA_BUNDLE"] = container_ca_path
+        
+        LOG.info("Injected CA bundle environment variables pointing to %s", container_ca_path)
+        
+        return template

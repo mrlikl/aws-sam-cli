@@ -6,6 +6,7 @@ import logging
 import os
 from typing import List
 
+from samcli.lib.utils.ca_bundle import get_ca_bundle_from_profile
 from samcli.lib.utils.packagetype import IMAGE
 from samcli.local.docker.exceptions import InvalidRuntimeException
 from samcli.local.docker.lambda_debug_settings import LambdaDebugSettings
@@ -111,6 +112,10 @@ class LambdaContainer(Container):
         entry, container_env_vars = LambdaContainer._get_debug_settings(runtime, debug_options)
         additional_options = LambdaContainer._get_additional_options(runtime, debug_options)
         additional_volumes = LambdaContainer._get_additional_volumes(runtime, debug_options)
+        
+        # Add CA bundle volume if configured
+        ca_bundle_volumes, ca_bundle_env_vars = LambdaContainer._get_ca_bundle_volumes()
+        additional_volumes.update(ca_bundle_volumes)
 
         _work_dir = self._WORKING_DIR
         _entrypoint = None
@@ -134,7 +139,8 @@ class LambdaContainer(Container):
                 _entrypoint = _entrypoint + _additional_entrypoint_args
             _work_dir = (image_config.get("WorkingDirectory") if image_config else None) or config.get("WorkingDir")
 
-        env_vars = {**env_vars, **container_env_vars}
+        # Merge CA bundle env vars first so they can be overridden by container_env_vars if needed
+        env_vars = {**env_vars, **ca_bundle_env_vars, **container_env_vars}
         super().__init__(
             image,
             _command if _command else [],
@@ -222,6 +228,41 @@ class LambdaContainer(Container):
             volumes[debug_options.debugger_path] = LambdaContainer._DEBUGGER_VOLUME_MOUNT
 
         return volumes
+
+    @staticmethod
+    def _get_ca_bundle_volumes():
+        """
+        Return CA bundle volume mount and environment variables if ca_bundle is configured in AWS profile.
+        
+        Returns
+        -------
+        tuple
+            (volumes_dict, env_vars_dict) - Volume mounts and environment variables for CA bundle
+        """
+        volumes = {}
+        env_vars = {}
+        
+        # Get ca_bundle from AWS profile (using default profile)
+        ca_bundle = get_ca_bundle_from_profile(None)
+        
+        if ca_bundle:
+            # Mount the CA bundle file to the container at /tmp (writable location)
+            ca_bundle_filename = os.path.basename(ca_bundle)
+            container_ca_bundle_path = f"/tmp/{ca_bundle_filename}"
+            
+            LOG.info("Mounting CA bundle from %s to %s", ca_bundle, container_ca_bundle_path)
+            
+            volumes[ca_bundle] = {
+                "bind": container_ca_bundle_path,
+                "mode": "ro"
+            }
+            
+            # Set NODE_EXTRA_CA_CERTS as container environment variable (not Lambda env var)
+            # This must be set before Node.js starts to take effect
+            env_vars["NODE_EXTRA_CA_CERTS"] = container_ca_bundle_path
+            LOG.debug("Set NODE_EXTRA_CA_CERTS=%s for Node.js runtime", container_ca_bundle_path)
+        
+        return volumes, env_vars
 
     @staticmethod
     def _get_image(
